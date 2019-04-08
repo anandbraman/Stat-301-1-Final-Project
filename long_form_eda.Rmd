@@ -1,0 +1,288 @@
+---
+title: "EDA of Medicare Inpatient Charge Data"
+author: "Anand Raman"
+date: "12/9/2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Loading Packages
+```{r, message=FALSE}
+library(tidyverse)
+library(ggstance)
+library(usmap)
+```
+
+# Datasets
+
+For this project I used data from the Centers for Medicare and Medicaid Services. Both datasets fall under the category of Medicare and Provider Utilization Payment Data: Inpatient. This means the charge data is entirely composed of discharges and billings for inpatient treatments and diagnoses (heart transplants, septicemia treatments, joint replacements etc.) Specifically, I use data from 2015 and 2016 -- the most recently published data. I have merged the two datasets to enable comparison. Details of the merging process can be found in cleaning_merging.R. All details regarding variables contained in the dataset can be found in the Methodology document. This is supplemented by my own codebook which is a simple excel workbook. 
+<br><br>
+
+Brief note on terminology: In this data, the abbreviations CC and MCC stand for "complication or comorbidity" and "major complication or comorbidity" respectively. Comorbidity is the presence of two or more chronic conditions in a patient. 
+<br><br>
+
+### Reading in Data
+```{r, message = FALSE}
+med <- read_csv("data/processed/medicare_inpatient_15_16.csv")
+```
+
+# Analysis 
+
+#### Most Common Inpatient Charges
+I will display the most commonly diagnosed issues across both years, taking the sum of total number of discharged patients across years 2015 and 2016. 
+<br>
+```{r}
+med %>% 
+  gather(tot_discharges_15,
+         tot_discharges_16, 
+         key = tot_by_yr,
+         value = tot_discharges) %>% 
+  group_by(drg_definition) %>% 
+  summarise(tot_discharges = sum(tot_discharges)) %>% 
+  arrange(desc(tot_discharges)) %>%
+  slice(1:10)
+```
+<br><br>
+
+The next tibble splits the counts of each charge across years. 
+<br>
+```{r}
+med %>% 
+  group_by(drg_definition) %>% 
+  summarise( discharges_2015 = sum(tot_discharges_15),
+            discharges_2016 = sum(tot_discharges_16)) %>% 
+  arrange(desc(discharges_2016, discharges_2015))
+```
+<br><br>
+
+The next analysis focuses on the three most commonly diagnosed issues: Major joint replacement or reattachment of lower extremity w/o MCC, heart failure and shock with MCC, and heart failure and shock with CC. First, I select the rows I am interested in and then I plot the trends in the top 3 most common procedures.
+<br><br>
+
+```{r}
+top_3 <- med %>% gather(tot_discharges_15,
+               tot_discharges_16, 
+               key = tot_by_yr,
+               value = tot_discharges) %>% 
+  mutate(year = case_when(
+    tot_by_yr == "tot_discharges_16" ~ "2016",
+    tot_by_yr == "tot_discharges_15" ~ "2015"
+  )) %>% 
+  group_by(drg_definition, year) %>% 
+  summarise(tot_discharges = sum(tot_discharges)) %>% 
+  arrange(desc(tot_discharges))
+
+top_3 <- top_3[1:6, ]
+
+top_3 %>% 
+  ggplot(aes(x = year, y = tot_discharges, color = str_wrap(drg_definition, 40))) +
+  geom_point() +
+  geom_line(aes(group = drg_definition)) +
+  theme(legend.position = "bottom", legend.direction = "vertical",
+        legend.text=element_text(size=6), legend.title = element_blank()) +
+  xlab("Year") + 
+  ylab("Total Discharges")
+```
+<br><br>
+Between 2015 and 2016 there was an increase in the number of major joint replacements and heart failure with MCC, but a decrease in the number of heart failures with CC. 
+
+<br><br>
+
+One way to further contextualize data on the change in the number of diagnoses of a certain condition is to describe the percent change in occurrences of conditions. In this, case I filter for conditions which have over 25000 diagnoses to improve the stability of estimates and to assess the most common of medical conditions in the elderly.  
+<br><br>
+
+```{r}
+med %>%
+  group_by(drg_definition) %>% 
+  filter(sum(tot_discharges_16) >= 25000) %>% 
+  summarise(percent_chng = (sum(tot_discharges_16)/sum(tot_discharges_15)-1) * 100,
+            discharges_16 = sum(tot_discharges_16)) %>% 
+  arrange(desc(percent_chng)) 
+
+med %>%
+  group_by(drg_definition) %>% 
+  filter(sum(tot_discharges_16) >= 25000) %>% 
+  summarise(percent_chng = (sum(tot_discharges_16)/sum(tot_discharges_15)-1) * 100,
+            discharges_16 = sum(tot_discharges_16)) %>% 
+  arrange(percent_chng) 
+
+med %>%
+  group_by(drg_definition) %>% 
+  filter(sum(tot_discharges_16) >= 25000) %>% 
+  summarise(percent_chng = (sum(tot_discharges_16)/sum(tot_discharges_15) - 1) * 100) %>% 
+  ggplot(aes(x = percent_chng)) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous("Percent Change 2015-2016", breaks = seq(-40, 40, 20)) +
+  scale_y_continuous("Count", breaks = seq(0, 10, 1))
+```
+<br><br>
+Evidently, most inpatient treatments did not change in occurence between 2015 and 2016, which makes the upward trend in lower extremity reattachment or replacement look more like noise than a signal. However, the vast change in infectious & parasitic diseases with O.R. procedure with MCC is surely something to which attention should be paid, as is the increase in the number of joint replacements. The number of occurrences is so large that an increase of 8.44% is very interesting. Furthermore, the number of occurences of pneumonia is declining, with and without major comorbidity. 
+
+
+
+#### Medicare Charges by State
+
+In this section, I analyze data related to inpatient charges across states in the US. Using the techniques specified in the Methodology document from the CMS, I recalculate totals to enable grouped summary statistics by state. The data in its original form contains total discharges and then averages for medicare payments, total payments and total covered charges. By multiplying these averages by the total discharges, I am able to recreate the totals that the CMS used to calculate the averages. This allows me to perform more accurate grouped summaries by state. Taking the average of averages weights observations unequally.
+
+```{r}
+med <- med %>% mutate(
+  tot_cov_charges_15 = avg_covered_charges_15 * tot_discharges_15,
+  tot_cov_charges_16 = avg_covered_charges_16 * tot_discharges_16,
+  tot_payments_15 = avg_tot_payments_15 * tot_discharges_15,
+  tot_payments_16 = avg_tot_payments_16 * tot_discharges_16,
+  tot_medicare_payments_15 = avg_medicare_payments_15 * tot_discharges_15,
+  tot_medicare_payments_16 = avg_medicare_payments_16 * tot_discharges_16
+)
+```
+
+##### Highest Total Payments By State
+The units for each graph are in dollars. 
+```{r}
+avg_total_payments <- med %>% 
+  rename("state" = "provider_state") %>% 
+  group_by(state) %>% 
+  summarise(avg_total_payments_15 = sum(tot_payments_15)/sum(tot_discharges_15),
+            avg_total_payments_16 = sum(tot_payments_16)/sum(tot_discharges_16),
+            diff = avg_total_payments_16 - avg_total_payments_15
+            ) %>% 
+  arrange(desc(avg_total_payments_15, avg_total_payments_16))
+
+plot_usmap(data = avg_total_payments, values = "avg_total_payments_15") +
+  scale_fill_continuous(str_wrap("Average Total Payments 2015", 15)) +
+  theme(legend.position = "right")
+
+plot_usmap(data = avg_total_payments, values = "avg_total_payments_16") + 
+  scale_fill_continuous(str_wrap("Average Total Payments 2016", 15)) +
+  theme(legend.position = "right")
+```
+<br><br>
+Health care for the elderly was most costly in California, Hawaii, Alaska, Oregon, Washingon, Minnesota, New York and Vermont. 
+<br><br>
+The next graph represents the change in average total payments by state between 2015 and 2016. 
+
+```{r}
+plot_usmap(data = avg_total_payments, values = "diff") +
+  scale_fill_gradient2(str_wrap("Difference in Average Total Payments 2015-16", 15)) +
+  theme(legend.position = "right")
+```
+<br><br>
+The key finding from these three graphs is that overall, average total payments are increasing. Almost every state saw an incrase in average total payments. This has many implications and could be related to the increasing number of elderly in the United States or changes to health care infrastructure and legislaton. In assessing the change in health care costs in this dataset, it is important to pay attention to the difference between individual contributions and medicare contributions. 
+<br><br>
+
+#### Individual Contributions by State
+Using the methodology section of the CMS data release, I was able to calculate estimates of individuals contributions to their inpatient charges. This was calcultated by taking the difference between average total charges and average medicare payments. 
+
+```{r}
+med <- med %>% mutate(tot_copay_deductible_16 = tot_payments_16 - tot_medicare_payments_16,
+                      tot_copay_deductible_15 = tot_payments_15 - tot_medicare_payments_15)
+
+
+avg_copay_deductible <- med %>% 
+  rename("state" = "provider_state") %>% 
+  group_by(state) %>% 
+  summarise(avg_copay_16 = sum(tot_copay_deductible_16)/sum(tot_discharges_16),
+         avg_copay_15 = sum(tot_copay_deductible_15)/sum(tot_discharges_15),
+         diff = avg_copay_16 - avg_copay_15)
+
+
+avg_copay_deductible %>% 
+  arrange(desc(avg_copay_16, avg_copay_15))
+
+plot_usmap(data = avg_copay_deductible, values = "avg_copay_16") +
+  scale_fill_continuous(str_wrap("Average Individual Contribution 2016", 15)) +
+  theme(legend.position = "right")
+
+plot_usmap(data = avg_copay_deductible, values = "avg_copay_15") +
+  scale_fill_continuous(str_wrap("Average Individual Contribution 2015", 15)) +
+  theme(legend.position = "right")
+
+plot_usmap(data = avg_copay_deductible, values = "diff") +
+  scale_fill_gradient2(str_wrap("Difference in Individual Contribution 2015-16", 15)) +
+  theme(legend.position = "right")
+```
+<br><br>
+In 2016, average individual contributions were highest in Hawaii, Utah, Pennsylvania, Alaska, Wisconsin, Virginia, New York, Washington, and Connecticut. This is a very interesting mix of states to be in the top 10 as there does not seem to be a self evident factor connecting the states. Further research should analyze commonalities and look more deeply into what could be keeping individual contributions for inpatient procedures high for Medicare recipients. Furthermore, while most states saw either modest increases,or no change in individual contributions, average individual contributions in Utah fell by `$`192 and in Vermont by `$`218. The data on Vermont is particularly interesting because Vermont has relatively high average total costs. North Dakota, Nebraska, and Alabama all saw large increases in individual contributions to inpatient charges. 
+
+##### Medicare contributions by state
+```{r}
+med_payments <- med %>% 
+  rename("state" = "provider_state") %>% 
+  group_by(state) %>% 
+  summarise(avg_med_payments_15 = sum(tot_medicare_payments_15)/sum(tot_discharges_15),
+            avg_med_payments_16 = sum(tot_medicare_payments_16)/sum(tot_discharges_16),
+            diff = avg_med_payments_16 - avg_med_payments_15)
+
+plot_usmap(data = med_payments, values = "avg_med_payments_15") +
+  scale_fill_continuous(str_wrap("Average Medicare Contribution 2015", 15)) +
+  theme(legend.position = "right")
+
+plot_usmap(data = med_payments, values = "avg_med_payments_16") +
+  scale_fill_continuous(str_wrap("Average Medicare Contribution 2016", 15)) +
+  theme(legend.position = "right")
+
+plot_usmap(data = med_payments, values = "diff") +
+  scale_fill_gradient2(str_wrap("Difference in Avg Medicare Contribution 2015-16", 15)) +
+  theme(legend.position = "right")
+```
+<br><br>
+Average medicare contributions are highest in states such as California, Oregon, Washington, Minnesota, New York, Vermont, Delaware, and Massachusetts. There appears to be a realtively consistent trend that in northern states, there is higher Medicare contribution. States with a lot of retirees that also have relatively low Medicare contribution (i.e. Florida) likely have low numbers because health care costs are lower in these states, as shown in the data related to average total costs. Additionally, across every state, medicare contributions increased between 2015 and 2016. 
+
+#### Most Expensive Conditions to Treat
+
+```{r}
+avg_cost <- med %>% 
+  group_by(drg_definition) %>% 
+  summarise(avg_payments_15 = sum(tot_payments_15)/sum(tot_discharges_15),
+            avg_payments_16 = sum(tot_payments_16)/sum(tot_discharges_16),
+            avg_medicare_16 = sum(tot_medicare_payments_16)/sum(tot_discharges_16),
+            avg_medicare_15 = sum(tot_medicare_payments_15)/sum(tot_discharges_15))
+
+avg_cost %>% arrange(desc(avg_payments_16, avg_tot_payments_15))
+```
+<br>
+At the top of the list are very intensive procedures. This is to be expected. Heart assist systems or heart transplants with MCC tops the list, likely because the procedure is so complex. Liver transplants, bone marrow transplants and lung transplants follow, which also makes sense given the complexity of the treatment. However, it is also a good idea to look at the conditions that are best and worst covered by medicare. 
+
+###### Copays and Deductibles by Condition
+```{r}
+copay_deductible <- med %>% 
+  group_by(drg_definition) %>% 
+  summarise(avg_payments_15 = sum(tot_payments_15)/sum(tot_discharges_15),
+            avg_payments_16 = sum(tot_payments_16)/sum(tot_discharges_16),
+            avg_medicare_16 = sum(tot_medicare_payments_16)/sum(tot_discharges_16),
+            avg_medicare_15 = sum(tot_medicare_payments_15)/sum(tot_discharges_15)) %>% 
+  transmute(drg_definition = drg_definition,
+            copay_deductible_15 = avg_payments_15 - avg_medicare_15,
+            copay_deductible_16 = avg_payments_16 - avg_medicare_16
+            )
+arrange(copay_deductible, desc(copay_deductible_16))
+```
+There is a considerable amount of overlap between the most expensive procedures and the ones with the highest out of pocket cost. 
+<br><br>
+Most data falls under $15000 for individual contributions so I will filter out observations greater than 15000. The following is a graph that represents the relationship between individuals contributions in 2015 and 2016. 
+```{r}
+copay_deductible %>% filter(copay_deductible_15 <= 15000) %>% 
+  ggplot(aes(x = copay_deductible_15, y = copay_deductible_16)) +
+  geom_point() +
+  geom_smooth(method = MASS::rlm) +
+  xlab("Individual Contribution 2015") +
+  ylab("Individual Contribution 2016")  
+```
+
+<br>
+It appears that even a robust linear model does not fit the data particularly well. There  are still quite large numbers of outliers. I am going to plot a histogram of the difference in individual contributions by MS-DRG between 2015 and 2016. 
+
+```{r}
+copay_deductible <- copay_deductible %>% 
+  mutate(diff = copay_deductible_16 - copay_deductible_15)
+
+copay_deductible %>% 
+  filter(diff > -10000) %>% 
+  ggplot(aes(x = diff)) +
+  geom_histogram(bins = 50) + 
+  xlab("Difference in Average Individual Contribution 15-16") +
+  ylab("Count")
+
+var(copay_deductible$diff)
+```
+
+The vast majority of copays/deductibles did not change with respect to condition. However, the distribution has an immense variance. This volatility in pricing should be further investigated in future analysis of Medicare data. 

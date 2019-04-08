@@ -1,0 +1,51 @@
+---
+title: "EDA Executive Summary"
+author: "Anand Raman"
+date: "12/10/2018"
+output: pdf_document
+---
+
+####### Load Packages
+```{r, message=FALSE}
+library(tidyverse)
+library(usmap)
+```
+
+######## Datasets
+For this project I used data from the Centers for Medicare and Medicaid Services. Both datasets fall under the category of Medicare and Provider Utilization Payment Data: Inpatient. This means the charge data is entirely composed of discharges and billings for inpatient treatments and diagnoses (heart transplants, septicemia treatments, joint replacements etc.) Specifically, I use data from 2015 and 2016 -- the most recently published data. I have merged the two datasets to enable comparison. Details of the merging process can be found in cleaning_merging.R. All details regarding variables contained in the dataset can be found in the Methodology document. This is supplemented by my own codebook which is a simple excel workbook. 
+
+```{r, message=FALSE}
+med <- read_csv("data/processed/medicare_inpatient_15_16.csv")
+```
+
+####### Key Findings
+
+Between 2015 and 2016 average total payments (the average sum money paid to a health care provider to treat a condition) as well as average Medicare contribution (the part of a medical bill paid by Medicare) rose in every state across America. In some cases, the increase in total payments was more than offset by the increase in Medicare contribution. In other states, the increase in Medicare contributions was insufficient to cover the increasing average total cost of health care. Vermont in particular shows relatively low health care costs for the elderly and has lowered individual burdens as well, decreasing the burden on those receiving inpatient treatments through Medicare by $218 on average. 
+
+```{r, echo=FALSE}
+
+med <- med %>% mutate(
+  tot_cov_charges_15 = avg_covered_charges_15 * tot_discharges_15,
+  tot_cov_charges_16 = avg_covered_charges_16 * tot_discharges_16,
+  tot_payments_15 = avg_tot_payments_15 * tot_discharges_15,
+  tot_payments_16 = avg_tot_payments_16 * tot_discharges_16,
+  tot_medicare_payments_15 = avg_medicare_payments_15 * tot_discharges_15,
+  tot_medicare_payments_16 = avg_medicare_payments_16 * tot_discharges_16
+)
+
+med <- med %>% mutate(tot_copay_deductible_16 = tot_payments_16 - tot_medicare_payments_16,
+                      tot_copay_deductible_15 = tot_payments_15 - tot_medicare_payments_15)
+
+avg_copay_deductible <- med %>% 
+  rename("state" = "provider_state") %>% 
+  group_by(state) %>% 
+  summarise(avg_copay_16 = sum(tot_copay_deductible_16)/sum(tot_discharges_16),
+         avg_copay_15 = sum(tot_copay_deductible_15)/sum(tot_discharges_15),
+         diff = avg_copay_16 - avg_copay_15)
+```
+
+```{r, echo=FALSE}
+plot_usmap(data = avg_copay_deductible, values = "diff") +
+  scale_fill_gradient2(str_wrap("Difference in Individual Contribution 2015-16", 15)) +
+  theme(legend.position = "right")
+```
